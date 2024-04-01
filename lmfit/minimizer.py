@@ -1767,6 +1767,90 @@ class Minimizer:
 
         return result
 
+    def dlib_find_min_global(self, params=None, **kws):
+        """Use the `dlib.find_min_global` algorithm to find the global minimum.
+
+        This method calls :scipydoc:`dlib.find_min_global` using the
+        default arguments.
+
+        The find_min_global function in dlib implements a global optimization algorithm based on Bayesian Optimization. Bayesian Optimization is a strategy for finding the minimum of a function that is expensive to evaluate. It works by building a probabilistic model of the function's behavior and using that model to make intelligent decisions about where in the parameter space to evaluate next.
+
+        Parameters
+        ----------
+        params : Parameters, optional
+            Contains the Parameters for the model. If None, then the
+            Parameters used to initialize the Minimizer object are used.
+
+        **kws : dict, optional
+            Minimizer options to pass to :`dlib.find_min_global`.
+
+        Returns
+        -------
+        MinimizerResult
+            Object containing the optimization results from the
+            dlib.find_min_global algorithm.
+
+
+        .. versionadded:: 0.9.10
+
+        """
+        import dlib
+        result = self.prepare_fit(params=params)
+        for name, param in result.params.items():
+            if param.min is None or param.max is None:
+                raise ValueError('To use find_min_global, all parameters have defined boundaries.')
+            if param.min == -np.inf or param.max == np.inf:
+                raise ValueError('To use find_min_global, all parameters have defined boundaries.')
+        result.method = 'find_min_global'
+        self.set_max_nfev(kws['num_function_calls'], 200000 * (result.nvarys + 1))
+
+        bounds = [
+            (param.min, param.max) for param_name, param in result.params.items() if param.vary
+        ]
+
+        find_min_global_kws = {
+            'lower_bound': [bound[0] for bound in bounds],
+            'upper_bound': [bound[1] for bound in bounds],
+            'num_function_calls': 1000,
+            'solver_epsilon': 0.0
+        }
+        #find_min_global_kws.update(self.kws)
+        find_min_global_kws.update(kws)
+        find_min_global_kws_vlist = [item for item in find_min_global_kws.values()]
+
+        def penalty_adapter(*args):
+            params_array = np.array(args)  # Convert the sequence of arguments to a numpy array
+            return self.penalty(params_array)  # Call the original penalty function with this array
+
+        x0 = result._init_vals_internal
+        result.call_kws = find_min_global_kws
+
+        ret = dlib.find_min_global(penalty_adapter,*find_min_global_kws_vlist)
+
+        optimized_params, optimized_function_value = ret
+
+        if not result.aborted:
+            result.message = 'This is a fake function, find_min_global has no comment.'
+            result.nfev -= 1
+            result.residual = self.__residual(np.asarray(optimized_params))
+            #result.nfev = self.max_nfev - 1
+        elif result.nfev > self.max_nfev - 5:
+            result.nfev -= 2
+            _best = result.last_internal_values
+            result.residual = self.__residual(_best, False)
+
+        result._calculate_statistics()
+
+        # calculate the cov_x and estimate uncertainties/correlations
+        if (not result.aborted and self.calc_covar and HAS_NUMDIFFTOOLS and
+                len(result.residual) > len(result.var_names)):
+            _covar_ndt = self._calculate_covariance_matrix(ret.x)
+            if _covar_ndt is not None:
+                result.covar = self._int2ext_cov_x(_covar_ndt, ret.x)
+                self._calculate_uncertainties_correlations()
+
+        return result
+
     def brute(self, params=None, Ns=20, keep=50, workers=1, max_nfev=None):
         """Use the `brute` method to find the global minimum of a function.
 
@@ -2313,6 +2397,8 @@ class Minimizer:
             function = self.brute
         elif user_method == 'basinhopping':
             function = self.basinhopping
+        elif user_method == 'dlib_find_min_global':
+            function = self.dlib_find_min_global
         elif user_method == 'ampgo':
             function = self.ampgo
         elif user_method == 'emcee':
