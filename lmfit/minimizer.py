@@ -1851,6 +1851,137 @@ class Minimizer:
 
         return result
 
+    def pygmo_mbh(self, params, **kws):
+
+        """This is a wrapper that adopt pygmo2 packge, using the `basinhopping(mbh)` algorithm as the meta
+        algorithm to find the global minimum. The equality/inequalities constrains will be added later
+
+
+        Parameters
+        ----------
+        params : Parameters, optional
+            Contains the Parameters for the model. If None, then the
+            Parameters used to initialize the Minimizer object are used.
+
+        **kws : dict, optional
+            Minimizer options to pass to mbh.
+                The name and the args for the basic(local) algorithm should be something like:
+        {..., 'baalgokws':{'algorithm':'de', 'gen':20, ...},...}
+        available parameters:
+                algorithm_list = ['gaco','maco','gwo','bee_colony', 'de', 'sea', 'sga', 'sade', 'de1220', 'cmaes','moead',
+                          'moead_gen','compass_search', 'simulated_annealing', 'pso', 'pso_gen', 'nsga2', 'nspso' ]
+        See: https://esa.github.io/pygmo2/algorithms.html
+        Returns
+        -------
+        MinimizerResult
+            Object containing the optimization results from the
+            pygmp.mbh algorithm.
+
+
+        .. versionadded:: 0.9.10
+
+        """
+        import pygmo as pg
+        result = self.prepare_fit(params=params)
+
+        for name, param in result.params.items():
+            if param.min is None or param.max is None:
+                raise ValueError('To use pygmo.mbh, all parameters have defined boundaries.')
+            if param.min == -np.inf or param.max == np.inf:
+                raise ValueError('To use pygmo.mbh, all parameters have defined boundaries.')
+        result.method = 'pygmo_mbh'
+
+        class myProblem():
+            def __init__(self, params, target_function, bounds, initial_guess = None):
+                self.params = params  # Initial parameters, could be used to set bounds or initial guess
+                self.target_function = target_function
+                self.bounds = bounds
+                self.initial_guess = initial_guess
+
+            def fitness(self, x):
+                # Calculate the objective function's value at x
+                return [self.target_function(x)]
+
+            def get_bounds(self):
+                # Assume each parameter has a lower bound of 0 and an upper bound of 10
+                # This should be adjusted based on the actual problem
+                lower_bounds = [bound[0] for bound in self.bounds]
+                upper_bounds = [bound[1] for bound in self.bounds]
+                return (lower_bounds, upper_bounds)
+
+            def get_nec(self):
+                # to be added
+                return 0
+
+            def get_nic(self):
+                # to be added
+                return 0
+
+        pygmo_mbh_kws = {
+            'stop': 100,
+            'perturb': 0.2
+        }
+        # algorithm_list = ['gaco','maco','gwo','bee_colony', 'de', 'sea', 'sga', 'sade', 'de1220', 'cmaes','moead',
+        #                   'moead_gen','compass_search', 'simulated_annealing', 'pso', 'pso_gen', 'nsga2', 'nspso' ]
+
+        if 'baalgokws' in  kws:
+            basic_algorithm_kws = kws['baalgokws']
+            basic_algo_class = getattr(pg, basic_algorithm_kws['algorithm'])
+            basic_algorithm_kws.pop('algorithm')
+            basic_algo = basic_algo_class(**basic_algorithm_kws)
+            kws.pop('baalgokws')
+        else:
+            basic_algo = pg.de(gen=20)
+        if 'pop_size' in kws:
+            local_pop_size = kws['pop_size']
+            kws.pop('pop_size')
+        else:
+            local_pop_size = 10
+
+        pygmo_mbh_kws.update(kws)
+
+
+        # Instantiate the MBH algorithm, passing the DE algorithm as the local optimizer
+        mbh_algo = pg.mbh(algo=basic_algo, **pygmo_mbh_kws)
+
+        # Create an instance of the algorithm class with the MBH algorithm
+        algo = pg.algorithm(mbh_algo)
+
+        result.call_kws = pygmo_mbh_kws
+        # Create a problem instance
+        params_bounds = [
+            (param.min, param.max) for param_name, param in result.params.items() if param.vary
+        ]
+        prob = pg.problem(myProblem(params = result.params, target_function=self.penalty, bounds= params_bounds,
+                                    initial_guess=result._init_vals_internal))
+
+        pop = pg.population(prob, size=local_pop_size)
+        pop = algo.evolve(pop)
+        optimized_params = pop.champion_x
+        optimized_function_value = pop.champion_f
+
+        if not result.aborted:
+            result.message = 'This is a fake function, pygmo.mbh has no comment.'
+            result.nfev -= 1
+            result.residual = self.__residual(np.asarray(optimized_params))
+            #result.nfev = self.max_nfev - 1
+        elif result.nfev > self.max_nfev - 5:
+            result.nfev -= 2
+            _best = result.last_internal_values
+            result.residual = self.__residual(_best, False)
+
+        result._calculate_statistics()
+
+        # calculate the cov_x and estimate uncertainties/correlations
+        # if (not result.aborted and self.calc_covar and HAS_NUMDIFFTOOLS and
+        #         len(result.residual) > len(result.var_names)):
+        #     _covar_ndt = self._calculate_covariance_matrix(ret.x)
+        #     if _covar_ndt is not None:
+        #         result.covar = self._int2ext_cov_x(_covar_ndt, ret.x)
+        #         self._calculate_uncertainties_correlations()
+
+        return result
+
     def brute(self, params=None, Ns=20, keep=50, workers=1, max_nfev=None):
         """Use the `brute` method to find the global minimum of a function.
 
@@ -2399,6 +2530,8 @@ class Minimizer:
             function = self.basinhopping
         elif user_method == 'dlib_find_min_global':
             function = self.dlib_find_min_global
+        elif user_method == 'pygmo_mbh':
+            function = self.pygmo_mbh
         elif user_method == 'ampgo':
             function = self.ampgo
         elif user_method == 'emcee':
