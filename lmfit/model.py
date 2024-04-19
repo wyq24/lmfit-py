@@ -309,7 +309,7 @@ class Model:
             name = self.func.__name__
         self._name = name
 
-    def _reprstring(self, long=False):
+    def _reprstring(self, long=True):
         out = self._name
         opts = []
         if len(self._prefix) > 0:
@@ -468,7 +468,7 @@ class Model:
     @property
     def name(self):
         """Return Model name."""
-        return self._reprstring(long=False)
+        return self._reprstring(long=True)
 
     @name.setter
     def name(self, value):
@@ -497,7 +497,7 @@ class Model:
 
     def __repr__(self):
         """Return representation of Model."""
-        return f"<lmfit.Model: {self.name}>"
+        return self._reprstring(long=True)
 
     def copy(self, **kwargs):
         """DOES NOT WORK."""
@@ -509,6 +509,8 @@ class Model:
             return
         kw_args = {}
         keywords_ = None
+        indep_vars = []
+        default_vals = {}
         # need to fetch the following from the function signature:
         #   pos_args: list of positional argument names
         #   kw_args: dict of keyword arguments with default values
@@ -516,13 +518,13 @@ class Model:
         # 1. limited support for asteval functions as the model functions:
         if hasattr(self.func, 'argnames') and hasattr(self.func, 'kwargs'):
             pos_args = self.func.argnames[:]
+            default_vals = {v: inspect._empty for v in pos_args}
             for name, defval in self.func.kwargs:
                 kw_args[name] = defval
+                default_vals[name] = defval
         # 2. modern, best-practice approach: use inspect.signature
         else:
             pos_args = []
-            default_vals = {}
-            indep_vars = []
             sig = inspect.signature(self.func)
             for fnam, fpar in sig.parameters.items():
                 if fpar.kind == fpar.VAR_KEYWORD:
@@ -904,6 +906,7 @@ class Model:
         if kwargs is None:
             kwargs = {}
         out = {}
+        out.update(self.opts)
         for key, val in self.independent_vars_defvals.items():
             if val is not inspect._empty:
                 out[key] = val
@@ -1150,7 +1153,7 @@ class Model:
         # If independent_vars and data are alignable (pandas), align them,
         # and apply the mask from above if there is one.
         for var in self.independent_vars:
-            if var not in params:
+            if var not in params and var not in self.opts:
                 if var not in kwargs:
                     raise ValueError(f"'Missing independent variable '{var}'")
                 if not np.isscalar(kwargs[var]):
@@ -1271,7 +1274,7 @@ class CompositeModel(Model):
         self.opts = deepcopy(self.right.opts)
         self.opts.update(self.left.opts)
 
-    def _reprstring(self, long=False):
+    def _reprstring(self, long=True):
         return (f"({self.left._reprstring(long=long)} "
                 f"{self._known_ops.get(self.op, self.op)} "
                 f"{self.right._reprstring(long=long)})")
@@ -1686,7 +1689,7 @@ class ModelResult(Minimizer):
         nvarys = self.nvarys
         # ensure fjac and df2 are correct size if independent var updated by kwargs
         feval = self.model.eval(params, **userkws)
-        ndata = len(feval.view('float64'))        # allows feval to be complex
+        ndata = np.atleast_1d(feval).view('float64').ravel().size  # allows feval to be complex
         covar = self.covar
         if any(p.stderr is None for p in params.values()):
             return np.zeros(ndata)
@@ -1717,8 +1720,8 @@ class ModelResult(Minimizer):
 
             pars[pname].value = val0
             for key in fjac:
-                fjac[key][i] = (res1[key].view('float64')
-                                - res2[key].view('float64')) / (2*dval)
+                fjac[key][i] = (np.atleast_1d(res1[key]).view('float64').ravel()
+                                - np.atleast_1d(res2[key]).view('float64').ravel()) / (2*dval)
 
         for i in range(nvarys):
             for j in range(nvarys):
@@ -1735,7 +1738,10 @@ class ModelResult(Minimizer):
         # for complex data, convert back to real/imag pairs
         if feval.dtype in ('complex64', 'complex128'):
             for key in fjac:
-                df2[key] = df2[key][0::2] + 1j * df2[key][1::2]
+                df2[key] = df2[key].view(feval.dtype)
+
+        for key in fjac:
+            df2[key] = df2[key].reshape(feval.shape)
 
         df2_total = df2.pop('0')
         self.dely = scale * np.sqrt(df2_total)
